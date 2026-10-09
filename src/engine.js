@@ -90,40 +90,76 @@ export async function createEngine(onProgress, fromCache = false) {
 }
 
 // ── Chat streaming ───────────────────────────────────────────────────────────
-export async function streamChat(engineObj, messages, onToken) {
-  if (engineObj.type === 'webgpu') {
-    const stream = await engineObj.engine.chat.completions.create({
-      messages,
-      stream: true,
-      temperature: 0.7,
-      max_tokens: 512,
-    })
-    let full = ''
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta?.content || ''
-      if (delta) { full += delta; onToken(full) }
-    }
-    return full
-  }
+const MAX_TOKENS     = 1024  // per generation round
+const MAX_CONTINUES  = 3     // automatic follow-up rounds when a reply hits the limit
+const HISTORY_CHARS  = 6000  // keeps prompt + reply inside Phi-3.5's 4k context window
+const TAIL_CHARS     = 2000  // how much of the partial reply is fed back when continuing
+const CONTINUE_PROMPT = 'Continue exactly where you stopped. Do not repeat anything and do not add an introduction.'
 
-  // WASM path
-  const { generator, TextStreamer } = engineObj.engine
-  let full = ''
+// Keep the system prompt plus as many recent messages as fit the budget;
+// the latest user message is always kept.
+function trimHistory(messages) {
+  const [system, ...rest] = messages
+  const kept = []
+  let used = 0
+  for (let i = rest.length - 1; i >= 0; i--) {
+    const len = rest[i].content.length
+    if (kept.length && used + len > HISTORY_CHARS) break
+    kept.unshift(rest[i]); used += len
+  }
+  return [system, ...kept]
+}
+
+const tail = (s) => s.slice(-TAIL_CHARS)
+
+async function webgpuRound(engine, base, sofar, onPart) {
+  const lastUser = [...base].reverse().find(m => m.role === 'user')
+  const messages = sofar
+    ? [base[0], lastUser, { role: 'assistant', content: tail(sofar) }, { role: 'user', content: CONTINUE_PROMPT }]
+    : base
+  const stream = await engine.chat.completions.create({
+    messages, stream: true, temperature: 0.7, max_tokens: MAX_TOKENS,
+  })
+  let text = '', finish = null
+  for await (const chunk of stream) {
+    const choice = chunk.choices[0]
+    const delta = choice?.delta?.content || ''
+    if (delta) { text += delta; onPart(text) }
+    if (choice?.finish_reason) finish = choice.finish_reason
+  }
+  return { text, truncated: finish === 'length' }
+}
+
+async function wasmRound(engine, base, sofar, onPart) {
+  const { generator, TextStreamer } = engine
+  let text = '', tokens = 0
   const streamer = new TextStreamer(generator.tokenizer, {
     skip_prompt: true,
-    callback_function: (text) => { full += text; onToken(full) },
+    callback_function: (t) => { text += t; onPart(text) },
+    token_callback_function: (t) => { tokens += t?.length ?? 1 },
   })
+  // Prefill the partial reply so the model picks up mid-sentence
+  const prompt = generator.tokenizer.apply_chat_template(base, {
+    tokenize: false, add_generation_prompt: true,
+  }) + (sofar ? tail(sofar) : '')
 
-  const prompt = generator.tokenizer.apply_chat_template(messages, {
-    tokenize: false,
-    add_generation_prompt: true,
-  })
+  await generator(prompt, { max_new_tokens: MAX_TOKENS, temperature: 0.7, do_sample: true, streamer })
 
-  await generator(prompt, {
-    max_new_tokens: 512,
-    temperature: 0.7,
-    do_sample: true,
-    streamer,
-  })
+  const count = tokens || generator.tokenizer.encode(text).length
+  return { text, truncated: count >= MAX_TOKENS }
+}
+
+// Streams a full reply. If the model hits the token limit it automatically
+// continues (up to MAX_CONTINUES times) so the user never has to type "continue".
+export async function streamChat(engineObj, messages, onToken) {
+  const base  = trimHistory(messages)
+  const round = engineObj.type === 'webgpu' ? webgpuRound : wasmRound
+  let full = ''
+  for (let i = 0; i <= MAX_CONTINUES; i++) {
+    const { text, truncated } = await round(engineObj.engine, base, full, (part) => onToken(full + part))
+    full += text
+    onToken(full)
+    if (!truncated || !text) break
+  }
   return full
 }

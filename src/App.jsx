@@ -193,7 +193,8 @@ export default function App() {
     setMessages(prev => [...prev, userMsg, { role:'assistant', content:'' }])
     setInput(''); setGenerating(true)
     const personality = { friendly:'Be warm and encouraging.', professional:'Be precise and formal.', concise:'Be very brief, 2-3 sentences max.' }[settings.personality] || ''
-    const sysPrompt = cat.system.replace('{name}', kayaName) + ' ' + personality
+    const sysPrompt = cat.system.replace('{name}', kayaName) + ' ' + personality +
+      ' Always give a complete answer in a single reply; never stop midway or ask the user to say "continue".'
     const allMsgs = [{ role:'system', content:sysPrompt }, ...messages, userMsg]
     try {
       await streamChat(engineRef.current, allMsgs, (full) => {
