@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { createEngine, streamChat } from './engine'
+import { createEngine, streamChat, isCached, getCacheInfo, MODEL_VERSION } from './engine'
 import { getHistory, saveSession, deleteSession, clearHistory, getStats, bumpStats, getSettings, saveSettings } from './store'
 
 /* ══════════════════════════════════════════
@@ -125,6 +125,7 @@ export default function App() {
   const [loadPct, setLoadPct]       = useState(0)
   const [loadText, setLoadText]     = useState('')
   const [engineType, setEngineType] = useState(null)
+  const [fromCache, setFromCache]   = useState(false)
   const [activeTab, setActiveTab]   = useState('home')
   const [catId, setCatId]           = useState('general')
   const [messages, setMessages]     = useState([])
@@ -145,16 +146,23 @@ export default function App() {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior:'smooth' }) }, [messages])
 
+  // Auto-start from cache on every subsequent open — skip the welcome screen
+  useEffect(() => {
+    isCached().then(cached => {
+      if (cached) { setFromCache(true); loadModel(true) }
+    })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   const refreshHistory = () => setHistory(getHistory())
   const refreshStats   = () => setStats(getStats())
 
-  const loadModel = useCallback(async () => {
+  const loadModel = useCallback(async (cached = false) => {
     setAppState('loading')
     try {
       const eng = await createEngine((pct, text, type) => {
         setLoadPct(pct); setLoadText(text)
         if (type) setEngineType(type)
-      })
+      }, cached)
       engineRef.current = eng
       setEngineType(eng.type)
       setAppState('ready')
@@ -196,9 +204,9 @@ export default function App() {
     recogRef.current = r; r.start()
   }, [listening])
 
-  if (appState === 'idle')    return <WelcomeScreen onStart={loadModel} accent={accent} kayaName={kayaName}/>
-  if (appState === 'loading') return <LoadingScreen pct={loadPct} text={loadText} engineType={engineType} accent={accent} kayaName={kayaName}/>
-  if (appState === 'error')   return <ErrorScreen onRetry={loadModel} accent={accent}/>
+  if (appState === 'idle')    return <WelcomeScreen onStart={() => loadModel(false)} accent={accent} kayaName={kayaName}/>
+  if (appState === 'loading') return <LoadingScreen pct={loadPct} text={loadText} engineType={engineType} accent={accent} kayaName={kayaName} fromCache={fromCache}/>
+  if (appState === 'error')   return <ErrorScreen onRetry={() => loadModel(false)} accent={accent}/>
 
   return (
     <div className="flex flex-col h-full" style={{background:'#06090f'}}>
@@ -226,7 +234,11 @@ export default function App() {
         )}
         {activeTab === 'settings' && (
           <SettingsScreen engineType={engineType} accent={accent}
-            onClearAll={() => { clearHistory(); refreshHistory(); setMessages([]) }}/>
+            onClearAll={() => { clearHistory(); refreshHistory(); setMessages([]) }}
+            onForceUpdate={() => {
+              try { localStorage.removeItem('kaya_model_cache_v1') } catch {}
+              setFromCache(false); setMessages([]); setAppState('idle')
+            }}/>
         )}
       </div>
 
@@ -636,12 +648,18 @@ function CustomizeScreen({ settings, accent, kayaName, onChange }) {
 /* ══════════════════════════════════════════
    SETTINGS SCREEN
 ══════════════════════════════════════════ */
-function SettingsScreen({ engineType, accent, onClearAll }) {
-  const [confirmClear, setConfirmClear] = useState(false)
-  const Row = ({ label, value, danger, onPress }) => (
-    <button onClick={onPress} className="w-full flex items-center justify-between px-4 py-3.5 active:opacity-70 transition-all">
-      <span className="text-sm font-medium" style={{color:danger?'#f87171':'rgba(255,255,255,.8)'}}>{label}</span>
-      {value && <span className="text-sm text-white/30">{value}</span>}
+function SettingsScreen({ engineType, accent, onClearAll, onForceUpdate }) {
+  const [confirmClear, setConfirmClear]   = useState(false)
+  const [confirmUpdate, setConfirmUpdate] = useState(false)
+  const cacheInfo = getCacheInfo()
+
+  const Row = ({ label, value, danger, sub, onPress }) => (
+    <button onClick={onPress} className="w-full flex items-center justify-between px-4 py-3.5 active:opacity-70 transition-all text-left">
+      <div>
+        <span className="text-sm font-medium block" style={{color:danger?'#f87171':'rgba(255,255,255,.8)'}}>{label}</span>
+        {sub && <span className="text-xs text-white/30">{sub}</span>}
+      </div>
+      {value && <span className="text-sm text-white/30 flex-shrink-0 ml-3">{value}</span>}
     </button>
   )
   const Section = ({ title, children }) => (
@@ -666,6 +684,29 @@ function SettingsScreen({ engineType, accent, onClearAll }) {
           <Row label="Runs locally" value="100% on-device ✓"/>
         </Section>
 
+        <Section title="Model Cache">
+          <Row label="Status"
+            value={cacheInfo ? '✅ Downloaded & cached' : '⬇️ Not downloaded yet'}
+            sub={cacheInfo ? `${cacheInfo.type === 'webgpu' ? 'GPU' : 'WASM'} model · v${cacheInfo.version} · Stays on device` : 'Will download on first use'}/>
+          {confirmUpdate
+            ? <div className="flex gap-2 p-3">
+                <button onClick={() => { onForceUpdate(); setConfirmUpdate(false) }}
+                  className="flex-1 py-2.5 rounded-2xl text-sm font-bold"
+                  style={{background:`${accent}25`, color:accent}}>
+                  Yes, re-download
+                </button>
+                <button onClick={() => setConfirmUpdate(false)}
+                  className="flex-1 py-2.5 rounded-2xl text-sm font-bold"
+                  style={{background:'rgba(255,255,255,.07)', color:'rgba(255,255,255,.6)'}}>
+                  Cancel
+                </button>
+              </div>
+            : <Row label="Check for updates / Re-download"
+                sub="Forces a fresh model download on next start"
+                onPress={() => setConfirmUpdate(true)}/>
+          }
+        </Section>
+
         <Section title="Privacy">
           <Row label="Data storage" value="Local only"/>
           <Row label="Internet required" value="First download only"/>
@@ -674,6 +715,7 @@ function SettingsScreen({ engineType, accent, onClearAll }) {
 
         <Section title="App Info">
           <Row label="Version" value="1.0.0"/>
+          <Row label="Model version" value={`v${MODEL_VERSION}`}/>
           <Row label="Hackathon" value="AppBuildersPH 2026"/>
           <Row label="Built with" value="Claude Code"/>
         </Section>
@@ -684,7 +726,7 @@ function SettingsScreen({ engineType, accent, onClearAll }) {
                 <button onClick={() => { onClearAll(); setConfirmClear(false) }} className="flex-1 py-2.5 rounded-2xl text-sm font-bold" style={{background:'rgba(239,68,68,.2)', color:'#f87171'}}>Yes, clear everything</button>
                 <button onClick={() => setConfirmClear(false)} className="flex-1 py-2.5 rounded-2xl text-sm font-bold" style={{background:'rgba(255,255,255,.07)', color:'rgba(255,255,255,.6)'}}>Cancel</button>
               </div>
-            : <Row label="Clear all data" danger onPress={() => setConfirmClear(true)}/>
+            : <Row label="Clear all chat history" danger onPress={() => setConfirmClear(true)}/>
           }
         </Section>
       </div>
@@ -732,21 +774,43 @@ function WelcomeScreen({ onStart, accent, kayaName }) {
   )
 }
 
-function LoadingScreen({ pct, text, engineType, accent, kayaName }) {
+function LoadingScreen({ pct, text, engineType, accent, kayaName, fromCache }) {
   return (
     <div className="flex flex-col items-center justify-center min-h-full px-6 text-center relative overflow-hidden" style={{background:'#06090f'}}>
       <div style={{position:'absolute',width:350,height:350,top:-50,left:'50%',transform:'translateX(-50%)',borderRadius:'50%',background:`radial-gradient(circle,${accent}33,transparent 70%)`,filter:'blur(50px)'}}/>
       <div className="relative z-10 mascot-float mb-6"><KayaMascot size={120} mood="thinking" accent={accent}/></div>
-      <h2 className="text-xl font-bold text-white mb-1 relative z-10">Waking up {kayaName}…</h2>
-      {engineType && <span className="text-xs px-3 py-1 rounded-full mb-4 font-semibold relative z-10" style={{background:'rgba(255,255,255,.07)', color:engineType==='webgpu'?'#34d399':'#60a5fa'}}>{engineType==='webgpu'?'⚡ GPU mode — fast':'🔄 WASM mode — all devices'}</span>}
-      <p className="text-sm text-white/40 mb-8 max-w-xs leading-relaxed relative z-10">{text||'Initializing…'}</p>
-      <div className="w-full max-w-xs relative z-10">
-        <div className="h-1.5 rounded-full overflow-hidden mb-3" style={{background:'rgba(255,255,255,.08)'}}>
-          <div className="progress-bar h-full rounded-full" style={{width:`${pct}%`, background:`linear-gradient(90deg,${accent},${accent}aa)`, boxShadow:`0 0 12px ${accent}88`}}/>
+      <h2 className="text-xl font-bold text-white mb-1 relative z-10">
+        {fromCache ? `Welcome back!` : `Waking up ${kayaName}…`}
+      </h2>
+      {engineType && (
+        <span className="text-xs px-3 py-1 rounded-full mb-4 font-semibold relative z-10"
+          style={{background:'rgba(255,255,255,.07)', color:engineType==='webgpu'?'#34d399':'#60a5fa'}}>
+          {engineType==='webgpu'?'⚡ GPU mode — fast':'🔄 WASM mode — all devices'}
+        </span>
+      )}
+      <p className="text-sm text-white/40 mb-8 max-w-xs leading-relaxed relative z-10">
+        {fromCache ? 'Loading your AI from device cache…' : (text || 'Initializing…')}
+      </p>
+
+      {fromCache ? (
+        /* Cached: simple animated bar that pulses to signal activity */
+        <div className="w-full max-w-xs relative z-10">
+          <div className="h-1.5 rounded-full overflow-hidden" style={{background:'rgba(255,255,255,.08)'}}>
+            <div style={{height:'100%', borderRadius:'inherit', background:`linear-gradient(90deg,transparent,${accent},transparent)`, backgroundSize:'200% 100%', animation:'shimmer 1.4s linear infinite'}}/>
+          </div>
+          <p className="text-xs text-white/30 mt-3">No download needed · Using cached model</p>
         </div>
-        <p className="font-black text-2xl" style={{color:accent}}>{pct}%</p>
-      </div>
-      <p className="text-xs text-white/20 mt-4 relative z-10">Cached after first download · Never sent anywhere</p>
+      ) : (
+        /* First download: full progress bar + % */
+        <div className="w-full max-w-xs relative z-10">
+          <div className="h-1.5 rounded-full overflow-hidden mb-3" style={{background:'rgba(255,255,255,.08)'}}>
+            <div className="progress-bar h-full rounded-full" style={{width:`${pct}%`, background:`linear-gradient(90deg,${accent},${accent}aa)`, boxShadow:`0 0 12px ${accent}88`}}/>
+          </div>
+          <p className="font-black text-2xl" style={{color:accent}}>{pct}%</p>
+          <p className="text-xs text-white/20 mt-3">{text || ''}</p>
+          <p className="text-xs text-white/15 mt-1">~500 MB · Cached forever after this · Never sent anywhere</p>
+        </div>
+      )}
     </div>
   )
 }
