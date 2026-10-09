@@ -122,6 +122,7 @@ function OrbBg({ c1, c2 }) {
 ══════════════════════════════════════════ */
 export default function App() {
   const [appState, setAppState]     = useState('idle') // idle|loading|ready|error
+  const [engineReady, setEngineReady] = useState(false) // engine loaded and usable
   const [loadPct, setLoadPct]       = useState(0)
   const [loadText, setLoadText]     = useState('')
   const [engineType, setEngineType] = useState(null)
@@ -146,14 +147,15 @@ export default function App() {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior:'smooth' }) }, [messages])
 
-  // Auto-start from cache on every subsequent open — skip the welcome screen
+  // If cached: show dashboard immediately, load engine in the background
   useEffect(() => {
-    if (isCached()) { setFromCache(true); loadModel(true) }
+    if (isCached()) { setFromCache(true); setAppState('ready'); loadModelBg() }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshHistory = () => setHistory(getHistory())
   const refreshStats   = () => setStats(getStats())
 
+  // First-time download: shows full loading screen
   const loadModel = useCallback(async (cached = false) => {
     setAppState('loading')
     try {
@@ -163,8 +165,21 @@ export default function App() {
       }, cached)
       engineRef.current = eng
       setEngineType(eng.type)
+      setEngineReady(true)
       setAppState('ready')
     } catch { setAppState('error') }
+  }, [])
+
+  // Cache path: dashboard shows immediately, engine loads silently
+  const loadModelBg = useCallback(async () => {
+    try {
+      const eng = await createEngine((_, __, type) => {
+        if (type) setEngineType(type)
+      }, true)
+      engineRef.current = eng
+      setEngineType(eng.type)
+      setEngineReady(true)
+    } catch { setEngineReady(false) }
   }, [])
 
   const startNewChat = (id) => {
@@ -173,7 +188,7 @@ export default function App() {
   }
 
   const send = useCallback(async (text) => {
-    if (!text.trim() || generating || appState !== 'ready') return
+    if (!text.trim() || generating || !engineReady) return
     const userMsg = { role:'user', content:text.trim() }
     setMessages(prev => [...prev, userMsg, { role:'assistant', content:'' }])
     setInput(''); setGenerating(true)
@@ -212,11 +227,11 @@ export default function App() {
       <div className="flex-1 overflow-hidden relative">
         {activeTab === 'home' && (
           <HomeScreen stats={stats} history={history} settings={settings} accent={accent} kayaName={kayaName} engineType={engineType}
-            onStartChat={startNewChat} onTabChange={setActiveTab}/>
+            engineReady={engineReady} onStartChat={startNewChat} onTabChange={setActiveTab}/>
         )}
         {activeTab === 'chat' && (
           <ChatScreen cat={cat} cats={CATS} catId={catId} messages={messages} input={input} generating={generating} listening={listening}
-            accent={accent} kayaName={kayaName} engineType={engineType}
+            accent={accent} kayaName={kayaName} engineType={engineType} engineReady={engineReady}
             onSend={send} onInput={setInput} onVoice={startVoice} onSwitchCat={startNewChat}
             inputRef={inputRef} bottomRef={bottomRef}/>
         )}
@@ -265,7 +280,7 @@ export default function App() {
 /* ══════════════════════════════════════════
    HOME DASHBOARD
 ══════════════════════════════════════════ */
-function HomeScreen({ stats, history, settings, accent, kayaName, engineType, onStartChat, onTabChange }) {
+function HomeScreen({ stats, history, settings, accent, kayaName, engineType, engineReady, onStartChat, onTabChange }) {
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
   const todayStr = new Date().toDateString()
@@ -281,12 +296,20 @@ function HomeScreen({ stats, history, settings, accent, kayaName, engineType, on
         <h1 className="text-2xl font-black text-white">How can <span style={{color:accent}}>{kayaName}</span> help today?</h1>
       </div>
 
-      {/* Engine badge */}
+      {/* Engine badge / waking up indicator */}
       <div className="relative z-10 px-5 mb-4">
-        <span className="text-xs px-2.5 py-1 rounded-full font-semibold"
-          style={{background:`${engineType==='webgpu'?'#34d399':'#60a5fa'}18`, color:engineType==='webgpu'?'#34d399':'#60a5fa', border:`1px solid ${engineType==='webgpu'?'#34d39944':'#60a5fa44'}`}}>
-          {engineType === 'webgpu' ? '⚡ GPU mode — fast' : '🔄 WASM mode — all devices'}
-        </span>
+        {engineReady ? (
+          <span className="text-xs px-2.5 py-1 rounded-full font-semibold"
+            style={{background:`${engineType==='webgpu'?'#34d399':'#60a5fa'}18`, color:engineType==='webgpu'?'#34d399':'#60a5fa', border:`1px solid ${engineType==='webgpu'?'#34d39944':'#60a5fa44'}`}}>
+            {engineType === 'webgpu' ? '⚡ GPU mode — fast' : '🔄 WASM mode — all devices'}
+          </span>
+        ) : (
+          <span className="text-xs px-2.5 py-1 rounded-full font-semibold inline-flex items-center gap-1.5"
+            style={{background:'rgba(255,255,255,.07)', color:'rgba(255,255,255,.4)', border:'1px solid rgba(255,255,255,.1)'}}>
+            <span style={{display:'inline-block', width:6, height:6, borderRadius:'50%', background:accent, animation:'pulse 1s ease-in-out infinite'}}/>
+            Kaya is waking up…
+          </span>
+        )}
       </div>
 
       {/* Stats row */}
@@ -371,7 +394,7 @@ function HomeScreen({ stats, history, settings, accent, kayaName, engineType, on
 /* ══════════════════════════════════════════
    CHAT SCREEN
 ══════════════════════════════════════════ */
-function ChatScreen({ cat, cats, catId, messages, input, generating, listening, accent, kayaName, engineType,
+function ChatScreen({ cat, cats, catId, messages, input, generating, listening, accent, kayaName, engineType, engineReady,
   onSend, onInput, onVoice, onSwitchCat, inputRef, bottomRef }) {
   return (
     <div className="flex flex-col h-full relative" style={{background:'#06090f'}}>
@@ -383,7 +406,9 @@ function ChatScreen({ cat, cats, catId, messages, input, generating, listening, 
           <div className="mascot-float"><KayaMascot size={48} mood={generating?'thinking':'happy'} talking={generating} accent={accent}/></div>
           <div>
             <p className="font-bold text-white text-base leading-tight">{cat.emoji} {cat.label}</p>
-            <p className="text-xs" style={{color:cat.color}}>{generating ? `${kayaName} is thinking…` : `${kayaName} is ready`}</p>
+            <p className="text-xs" style={{color: !engineReady ? 'rgba(255,255,255,.35)' : cat.color}}>
+              {!engineReady ? 'Waking up from cache…' : generating ? `${kayaName} is thinking…` : `${kayaName} is ready`}
+            </p>
           </div>
         </div>
         <span className="text-xs px-2.5 py-1 rounded-full font-medium"
@@ -453,11 +478,12 @@ function ChatScreen({ cat, cats, catId, messages, input, generating, listening, 
             <textarea ref={inputRef} rows={1} value={input}
               onChange={e => { onInput(e.target.value); e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,110)+'px' }}
               onKeyDown={e => { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();onSend(input)} }}
-              placeholder={`Ask ${cat.label.toLowerCase()}…`} disabled={generating}
+              placeholder={engineReady ? `Ask ${cat.label.toLowerCase()}…` : 'Kaya is waking up, please wait…'}
+              disabled={generating || !engineReady}
               className="flex-1 bg-transparent outline-none text-sm text-white placeholder:text-white/30 resize-none leading-relaxed"
               style={{maxHeight:110}}/>
           </div>
-          <button onClick={() => onSend(input)} disabled={!input.trim()||generating}
+          <button onClick={() => onSend(input)} disabled={!input.trim() || generating || !engineReady}
             className="w-11 h-11 rounded-2xl flex-shrink-0 flex items-center justify-center text-lg font-bold transition-all active:scale-90 disabled:opacity-25"
             style={{background:input.trim()&&!generating?`linear-gradient(135deg,${accent},${accent}cc)`:'rgba(255,255,255,.07)'}}>
             ↑
