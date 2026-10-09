@@ -32,40 +32,15 @@ function saveCacheInfo(info) {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(info)) } catch {}
 }
 
-// Verifies the cached model files still exist in Cache Storage (best-effort).
-// Both libraries store their files there; we look for any cache entry whose
-// URL contains the model name fragment.
-async function isBrowserCacheValid(modelFragment) {
-  try {
-    const keys = await caches.keys()
-    for (const key of keys) {
-      const cache  = await caches.open(key)
-      const reqs   = await cache.keys()
-      if (reqs.some(r => r.url.includes(modelFragment))) return true
-    }
-  } catch { /* Cache API unavailable (private browsing, etc.) */ }
-  return false
-}
-
 // ── Public API ───────────────────────────────────────────────────────────────
-// Returns true when a cached download record exists AND matches the current
-// model version.  The caller uses this to decide whether to skip the welcome
-// screen and auto-start with a "from-cache" loading UI.
-export async function isCached() {
+// Returns true when a completed download has been recorded for the current
+// model version.  We trust localStorage alone — both WebLLM and Transformers.js
+// manage their own Cache Storage internally, and we don't need to second-guess
+// them.  If the user manually cleared browser cache the library will simply
+// re-download during createEngine() and saveCacheInfo() updates the record.
+export function isCached() {
   const info = getCacheInfo()
-  if (!info || info.version !== MODEL_VERSION) return false
-
-  // Extra check: confirm the files are still in Cache Storage
-  const fragment = info.type === 'webgpu' ? 'Phi-3' : 'Qwen2'
-  const valid = await isBrowserCacheValid(fragment)
-
-  if (!valid) {
-    // Cache was cleared — remove the stale record so the download restarts cleanly
-    try { localStorage.removeItem(CACHE_KEY) } catch {}
-    return false
-  }
-
-  return true
+  return !!(info && info.version === MODEL_VERSION)
 }
 
 // Creates and returns an AI engine object.

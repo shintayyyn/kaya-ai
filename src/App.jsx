@@ -148,9 +148,7 @@ export default function App() {
 
   // Auto-start from cache on every subsequent open — skip the welcome screen
   useEffect(() => {
-    isCached().then(cached => {
-      if (cached) { setFromCache(true); loadModel(true) }
-    })
+    if (isCached()) { setFromCache(true); loadModel(true) }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshHistory = () => setHistory(getHistory())
